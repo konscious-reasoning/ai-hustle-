@@ -1,4 +1,4 @@
-require('dotenv').config();
+
 const { Telegraf } = require('telegraf');
 const { ethers } = require('ethers');
 const cron = require('node-cron');
