@@ -1,386 +1,134 @@
-// index.js - Main Entry Point
+require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const { ethers } = require('ethers');
-require('dotenv').config();
+const cron = require('node-cron');
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL);
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+// Import services
+const ArbitrageService = require('./Services/arbitrage');
+const TradingService = require('./Services/trading');
 
-// Bot state
-let isTrading = false;
-let tradingInterval = null;
-let config = {
-    minProfitUSD: 5,
-    maxGasPrice: 50,
-    slippage: 0.5
-};
+// Import commands
+const commands = require('./Commands/index');
 
-// DEX addresses on Polygon
-const DEXS = {
-    QUICKSWAP: {
-        router: '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
-        factory: '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32'
-    },
-    SUSHISWAP: {
-        router: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
-        factory: '0xc35DADB65012eC5796536bD9864eD8773aBc74C4'
-    },
-    UNISWAP_V3: {
-        router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-        factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984'
-    }
-};
+// Import config
+const { TOKENS } = require('./Config/tokens');
+const { DEXS } = require('./Config/dex');
 
-// Common token addresses on Polygon
-const TOKENS = {
-    WMATIC: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
-    USDC: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-    USDT: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
-    WETH: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
-    DAI: '0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063'
-};
-
-// Router ABI (simplified)
-const ROUTER_ABI = [
-    'function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)',
-    'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)',
-    'function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable returns (uint[] memory amounts)',
-    'function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
-];
-
-// ERC20 ABI (simplified)
-const ERC20_ABI = [
-    'function balanceOf(address owner) view returns (uint256)',
-    'function transfer(address to, uint256 amount) returns (bool)',
-    'function approve(address spender, uint256 amount) returns (bool)',
-    'function allowance(address owner, address spender) view returns (uint256)',
-    'function symbol() view returns (string)',
-    'function decimals() view returns (uint8)'
-];
-
-// Utility functions
-async function getTokenPrice(tokenAddress, amount = '1') {
-    try {
-        const router = new ethers.Contract(DEXS.QUICKSWAP.router, ROUTER_ABI, provider);
-        const path = [tokenAddress, TOKENS.USDC];
-        const amountIn = ethers.utils.parseEther(amount);
-        const amounts = await router.getAmountsOut(amountIn, path);
-        return ethers.utils.formatUnits(amounts[1], 6); // USDC has 6 decimals
-    } catch (error) {
-        return '0';
-    }
-}
-
-async function findArbitrageOpportunities() {
-    const opportunities = [];
-    
-    try {
-        // Check WMATIC/USDC arbitrage between QuickSwap and SushiSwap
-        const amount = ethers.utils.parseEther('100'); // 100 WMATIC
+class PolygonArbitrageBot {
+    constructor() {
+        this.bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+        this.provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL);
+        this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
         
-        const quickRouter = new ethers.Contract(DEXS.QUICKSWAP.router, ROUTER_ABI, provider);
-        const sushiRouter = new ethers.Contract(DEXS.SUSHISWAP.router, ROUTER_ABI, provider);
-        
-        const path = [TOKENS.WMATIC, TOKENS.USDC];
-        
-        const quickAmounts = await quickRouter.getAmountsOut(amount, path);
-        const sushiAmounts = await sushiRouter.getAmountsOut(amount, path);
-        
-        const quickPrice = parseFloat(ethers.utils.formatUnits(quickAmounts[1], 6));
-        const sushiPrice = parseFloat(ethers.utils.formatUnits(sushiAmounts[1], 6));
-        
-        const priceDiff = Math.abs(quickPrice - sushiPrice);
-        const profitPercent = (priceDiff / Math.min(quickPrice, sushiPrice)) * 100;
-        
-        if (priceDiff > config.minProfitUSD) {
-            opportunities.push({
-                token: 'WMATIC/USDC',
-                buyDex: quickPrice < sushiPrice ? 'QuickSwap' : 'SushiSwap',
-                sellDex: quickPrice < sushiPrice ? 'SushiSwap' : 'QuickSwap',
-                profit: priceDiff.toFixed(2),
-                profitPercent: profitPercent.toFixed(2),
-                buyPrice: Math.min(quickPrice, sushiPrice).toFixed(4),
-                sellPrice: Math.max(quickPrice, sushiPrice).toFixed(4)
-            });
-        }
-        
-    } catch (error) {
-        console.error('Error finding opportunities:', error);
-    }
-    
-    return opportunities;
-}
-
-async function executeArbitrage(opportunity) {
-    try {
-        const gasPrice = await provider.getGasPrice();
-        const gasPriceGwei = parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'));
-        
-        if (gasPriceGwei > config.maxGasPrice) {
-            return { success: false, error: 'Gas price too high' };
-        }
-        
-        // This is a simplified example - in reality you'd need to:
-        // 1. Buy token on cheaper DEX
-        // 2. Sell token on expensive DEX
-        // 3. Handle slippage and MEV protection
-        
-        return { 
-            success: true, 
-            txHash: '0x' + Math.random().toString(16).substr(2, 64),
-            profit: opportunity.profit 
+        this.config = {
+            minProfitUSD: parseFloat(process.env.MIN_PROFIT_USD) || 5,
+            maxGasGwei: parseInt(process.env.MAX_GAS_GWEI) || 50,
+            slippageTolerance: parseFloat(process.env.SLIPPAGE_TOLERANCE) || 0.5,
+            isRunning: false
         };
+
+        this.arbitrageService = new ArbitrageService(this.provider, this.wallet);
+        this.tradingService = new TradingService(this.provider, this.wallet);
         
-    } catch (error) {
-        return { success: false, error: error.message };
+        this.initializeCommands();
+        this.startCronJobs();
     }
-}
 
-// Telegram bot commands
-bot.start((ctx) => {
-    const welcomeMessage = `
-🤖 *Polygon Arbitrage Bot*
-
-Welcome! I'm your personal arbitrage trading assistant.
-
-*Available Commands:*
-/status - Check wallet and bot status
-/scan - Find arbitrage opportunities
-/startbot - Start automatic trading
-/stopbot - Stop automatic trading
-/config - View/modify settings
-/balance - Check token balances
-/help - Show this help message
-
-*Setup Required:*
-Make sure you have MATIC for gas fees and your wallet is funded.
-
-Ready to start trading! 🚀
-    `;
-    
-    ctx.replyWithMarkdown(welcomeMessage);
-});
-
-bot.command('status', async (ctx) => {
-    try {
-        const balance = await provider.getBalance(wallet.address);
-        const maticBalance = ethers.utils.formatEther(balance);
-        const gasPrice = await provider.getGasPrice();
-        const gasPriceGwei = ethers.utils.formatUnits(gasPrice, 'gwei');
+    initializeCommands() {
+        // Initialize all bot commands
+        commands.init(this.bot, this);
         
-        const statusMessage = `
-📊 *Bot Status*
-
-*Wallet:* \`${wallet.address}\`
-*MATIC Balance:* ${parseFloat(maticBalance).toFixed(4)} MATIC
-*Gas Price:* ${parseFloat(gasPriceGwei).toFixed(2)} Gwei
-*Trading Status:* ${isTrading ? '🟢 Active' : '🔴 Stopped'}
-
-*Configuration:*
-• Min Profit: $${config.minProfitUSD}
-• Max Gas: ${config.maxGasPrice} Gwei
-• Slippage: ${config.slippage}%
-        `;
-        
-        ctx.replyWithMarkdown(statusMessage);
-    } catch (error) {
-        ctx.reply(`❌ Error getting status: ${error.message}`);
-    }
-});
-
-bot.command('scan', async (ctx) => {
-    ctx.reply('🔍 Scanning for arbitrage opportunities...');
-    
-    try {
-        const opportunities = await findArbitrageOpportunities();
-        
-        if (opportunities.length === 0) {
-            ctx.reply('No profitable arbitrage opportunities found at the moment.');
-            return;
-        }
-        
-        let message = '💰 *Arbitrage Opportunities Found:*\n\n';
-        
-        opportunities.forEach((opp, index) => {
-            message += `*${index + 1}. ${opp.token}*\n`;
-            message += `Buy: ${opp.buyDex} @ $${opp.buyPrice}\n`;
-            message += `Sell: ${opp.sellDex} @ $${opp.sellPrice}\n`;
-            message += `Profit: $${opp.profit} (${opp.profitPercent}%)\n\n`;
+        // Error handling
+        this.bot.catch((err, ctx) => {
+            console.error('Bot error:', err);
+            ctx.reply('❌ An error occurred. Please try again.');
         });
-        
-        ctx.replyWithMarkdown(message);
-        
-    } catch (error) {
-        ctx.reply(`❌ Error scanning: ${error.message}`);
     }
-});
 
-bot.command('startbot', async (ctx) => {
-    if (isTrading) {
-        ctx.reply('🟡 Bot is already running!');
-        return;
+    startCronJobs() {
+        // Scan for opportunities every 30 seconds when bot is running
+        cron.schedule('*/30 * * * * *', async () => {
+            if (this.config.isRunning) {
+                try {
+                    await this.scanAndTrade();
+                } catch (error) {
+                    console.error('Cron job error:', error);
+                }
+            }
+        });
     }
-    
-    isTrading = true;
-    ctx.reply('🟢 Arbitrage bot started! Monitoring opportunities...');
-    
-    tradingInterval = setInterval(async () => {
+
+    async scanAndTrade() {
         try {
-            const opportunities = await findArbitrageOpportunities();
+            const opportunities = await this.arbitrageService.findOpportunities(this.config);
             
-            for (const opp of opportunities) {
-                const result = await executeArbitrage(opp);
-                
-                if (result.success) {
-                    ctx.replyWithMarkdown(`
-✅ *Trade Executed!*
-
-*Pair:* ${opp.token}
-*Profit:* $${result.profit}
-*TX Hash:* \`${result.txHash}\`
-                    `);
+            for (const opportunity of opportunities) {
+                if (opportunity.profitUSD >= this.config.minProfitUSD) {
+                    console.log(`Found profitable opportunity: ${opportunity.profitUSD} USD`);
+                    
+                    const result = await this.tradingService.executeTrade(opportunity, this.config);
+                    
+                    if (result.success) {
+                        console.log('Trade executed successfully:', result);
+                    } else {
+                        console.log('Trade failed:', result.error);
+                    }
                 }
             }
         } catch (error) {
-            console.error('Trading error:', error);
+            console.error('Scan and trade error:', error);
         }
-    }, 30000); // Check every 30 seconds
-});
-
-bot.command('stopbot', (ctx) => {
-    if (!isTrading) {
-        ctx.reply('🟡 Bot is not currently running.');
-        return;
     }
-    
-    isTrading = false;
-    if (tradingInterval) {
-        clearInterval(tradingInterval);
-        tradingInterval = null;
-    }
-    
-    ctx.reply('🔴 Arbitrage bot stopped.');
-});
 
-bot.command('config', (ctx) => {
-    const configMessage = `
-⚙️ *Current Configuration*
-
-*Min Profit:* $${config.minProfitUSD}
-*Max Gas Price:* ${config.maxGasPrice} Gwei
-*Slippage:* ${config.slippage}%
-
-*To modify, use:*
-/setprofit <amount> - Set minimum profit in USD
-/setgas <price> - Set maximum gas price in Gwei
-/setslippage <percent> - Set slippage tolerance
-    `;
-    
-    ctx.replyWithMarkdown(configMessage);
-});
-
-bot.command('balance', async (ctx) => {
-    try {
-        const balances = {};
-        
-        for (const [symbol, address] of Object.entries(TOKENS)) {
-            const contract = new ethers.Contract(address, ERC20_ABI, provider);
-            const balance = await contract.balanceOf(wallet.address);
-            const decimals = await contract.decimals();
-            balances[symbol] = ethers.utils.formatUnits(balance, decimals);
-        }
-        
-        let message = '💰 *Token Balances:*\n\n';
-        
-        for (const [symbol, balance] of Object.entries(balances)) {
-            const formatted = parseFloat(balance).toFixed(4);
-            if (parseFloat(formatted) > 0) {
-                message += `${symbol}: ${formatted}\n`;
+    async getBalance(tokenAddress) {
+        try {
+            if (tokenAddress === ethers.constants.AddressZero) {
+                // Native MATIC balance
+                const balance = await this.provider.getBalance(this.wallet.address);
+                return ethers.utils.formatEther(balance);
+            } else {
+                // ERC20 token balance
+                const tokenContract = new ethers.Contract(
+                    tokenAddress,
+                    ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)'],
+                    this.provider
+                );
+                
+                const balance = await tokenContract.balanceOf(this.wallet.address);
+                const decimals = await tokenContract.decimals();
+                return ethers.utils.formatUnits(balance, decimals);
             }
+        } catch (error) {
+            console.error(`Error getting balance for ${tokenAddress}:`, error);
+            return '0';
         }
-        
-        ctx.replyWithMarkdown(message);
-        
-    } catch (error) {
-        ctx.reply(`❌ Error getting balances: ${error.message}`);
     }
-});
 
-bot.command('setprofit', (ctx) => {
-    const amount = parseFloat(ctx.message.text.split(' ')[1]);
-    if (isNaN(amount) || amount <= 0) {
-        ctx.reply('❌ Please provide a valid profit amount: /setprofit 10');
-        return;
+    async start() {
+        try {
+            console.log('🤖 Starting Polygon Arbitrage Bot...');
+            
+            // Test connection
+            const network = await this.provider.getNetwork();
+            console.log(`📡 Connected to network: ${network.name} (Chain ID: ${network.chainId})`);
+            
+            const balance = await this.provider.getBalance(this.wallet.address);
+            console.log(`💰 Wallet balance: ${ethers.utils.formatEther(balance)} MATIC`);
+            
+            await this.bot.launch();
+            console.log('✅ Bot is running!');
+            
+            // Graceful shutdown
+            process.once('SIGINT', () => this.bot.stop('SIGINT'));
+            process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
+            
+        } catch (error) {
+            console.error('❌ Failed to start bot:', error);
+            process.exit(1);
+        }
     }
-    
-    config.minProfitUSD = amount;
-    ctx.reply(`✅ Minimum profit set to $${amount}`);
-});
-
-bot.command('setgas', (ctx) => {
-    const price = parseFloat(ctx.message.text.split(' ')[1]);
-    if (isNaN(price) || price <= 0) {
-        ctx.reply('❌ Please provide a valid gas price: /setgas 50');
-        return;
-    }
-    
-    config.maxGasPrice = price;
-    ctx.reply(`✅ Maximum gas price set to ${price} Gwei`);
-});
-
-bot.command('setslippage', (ctx) => {
-    const slippage = parseFloat(ctx.message.text.split(' ')[1]);
-    if (isNaN(slippage) || slippage <= 0 || slippage > 10) {
-        ctx.reply('❌ Please provide a valid slippage (0.1-10): /setslippage 0.5');
-        return;
-    }
-    
-    config.slippage = slippage;
-    ctx.reply(`✅ Slippage tolerance set to ${slippage}%`);
-});
-
-bot.help((ctx) => {
-    const helpMessage = `
-🤖 *Polygon Arbitrage Bot Help*
-
-*Trading Commands:*
-/scan - Find current arbitrage opportunities
-/startbot - Start automatic trading
-/stopbot - Stop automatic trading
-
-*Information Commands:*
-/status - Check bot and wallet status
-/balance - View token balances
-/config - View configuration settings
-
-*Configuration Commands:*
-/setprofit <amount> - Set minimum profit in USD
-/setgas <price> - Set max gas price in Gwei
-/setslippage <percent> - Set slippage tolerance
-
-*Tips:*
-• Keep some MATIC for gas fees
-• Start with small profit targets
-• Monitor gas prices during high network activity
-• The bot scans every 30 seconds when active
-
-Need more help? Check the documentation or contact support.
-    `;
-    
-    ctx.replyWithMarkdown(helpMessage);
-});
-
-// Error handling
-bot.catch((err, ctx) => {
-    console.error('Bot error:', err);
-    ctx.reply('❌ An error occurred. Please try again.');
-});
+}
 
 // Start the bot
-console.log('Starting Polygon Arbitrage Bot...');
-bot.launch();
-
-// Graceful shutdown
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+const bot = new PolygonArbitrageBot();
+bot.start();
