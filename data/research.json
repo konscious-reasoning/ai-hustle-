@@ -1,0 +1,23 @@
+{
+  "market_analysis": {
+    "total_market": "2.5B",
+    "growth_rate": "22% YoY",
+    "top_segments": [
+      {
+        "name": "Content Creators",
+        "size": "500K+",
+        "pain_points": [
+          "Time-consuming repurposing",
+          "Cross-platform formatting"
+        ]
+      }
+    ]
+  },
+  "competitors": [
+    {
+      "name": "ContentAI",
+      "strengths": ["Brand recognition"],
+      "weaknesses": ["Limited templates"]
+    }
+  ]
+}
