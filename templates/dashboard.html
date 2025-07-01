@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Hustle Dashboard</title>
+    <style>
+        :root {
+            --primary: #00C896;
+            --secondary: #5E2BFF;
+            --dark: #1A1A2E;
+            --light: #F5F5F5;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            background: var(--dark);
+            color: white;
+            padding: 0;
+            margin: 0;
+        }
+        .container {
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        @media (max-width: 600px) {
+            .container { padding: 10px; }
+            .card { padding: 15px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h2>🚀 $1K AI Hustle</h2>
+            <p>Daily Target: {{ stats.daily_target }}</p>
+        </div>
+        
+        <!-- Mobile-friendly agent cards -->
+        <div class="card">
+            <h3>🎯 Strategist</h3>
+            <button onclick="runStrategist()">Run Analysis</button>
+        </div>
+    </div>
+
+    <script>
+    // Mobile-optimized interactions
+    function runStrategist() {
+        fetch('/api/strategist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ niche: 'AI tools' })
+        })
+        .then(response => response.json())
+        .then(data => alert('Analysis complete!'));
+    }
+    </script>
+</body>
+</html>

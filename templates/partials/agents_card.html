@@ -1,0 +1,22 @@
+<div class="card agent-card">
+    <h3>{{ agent.name }}</h3>
+    <p>{{ agent.description }}</p>
+    <div class="actions">
+        <button onclick="runAgent('{{ agent.id }}')" class="btn">
+            {{ action_label }}
+        </button>
+    </div>
+</div>
+
+<style>
+.agent-card {
+    border-left: 4px solid var(--primary);
+}
+.btn {
+    background: var(--primary);
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+</style>
